@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import re
-from json import loads
+from json import loads, dumps
 from datetime import datetime
 import base64
 
@@ -27,34 +27,35 @@ class VersionHandler(tornado.web.RequestHandler):
 class SubWebSocket(tornado.websocket.WebSocketHandler):
     def open(self, url):
         self.url = url
-        self.application.pubsub.subscribe(self.get_key(url), callback=self.on_message)
+        self.application.pubsub.subscribe(self.get_key(), callback=self.handle_redis_message)
+
+    def handle_redis_message(self, message):
+        print "SENT Message %s" % message
+
+        if message[0] != 'message':
+            return
+
+        self.write_message(message[2])
 
     def on_message(self, message):
-        print "Message %s" % message
+        print "RECEIVED Message %s" % message
+
         if message[0] != '{':
             return
-        self.write_message(message)
 
-    def on_close(self):
-        self.application.pubsub.unsubscribe(self.get_key(self.url))
-        self.application.pubsub._sub_callback = None
+        obj = loads(message)
 
-    def get_key(self, url):
-        return base64.b64encode(url.rstrip('/'))
-
-
-class PingHandler(tornado.web.RequestHandler):
-    def post(self):
-        username = self.get_argument("username")
-        url = self.get_argument("url")
-
-        self.application.redis.publish(self.get_key(url), dumps({
-            "user": username,
-            "url": url
+        self.application.redis.publish(self.get_key(), dumps({
+            "user": obj['user'],
+            "url": obj['url']
         }))
 
-    def get_key(self, url):
-        return base64.b64encode(url)
+    def on_close(self):
+        self.application.pubsub.unsubscribe(self.get_key())
+        self.application.pubsub._sub_callback = None
+
+    def get_key(self):
+        return base64.b64encode(self.url.rstrip('/'))
 
 
 class WhosOnApiServer(Server):
@@ -77,7 +78,6 @@ class WhosOnApiServer(Server):
     def get_handlers(self):
         handlers = [
             ('/version/?', VersionHandler),
-            ('/ping/?', PingHandler),
             ('/subscribe/(.+?)/?', SubWebSocket),
         ]
 
