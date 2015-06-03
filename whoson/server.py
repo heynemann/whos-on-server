@@ -5,6 +5,7 @@ import re
 from json import loads, dumps
 from datetime import datetime
 import base64
+from uuid import uuid4
 
 from cow.server import Server
 import tornado.web
@@ -27,7 +28,20 @@ class VersionHandler(tornado.web.RequestHandler):
 class SubWebSocket(tornado.websocket.WebSocketHandler):
     def open(self, url):
         self.url = url
-        self.application.pubsub.subscribe(self.get_key(), callback=self.handle_redis_message)
+        self.uuid = uuid4()
+
+        sentinel_hosts = self.application.config.get('SENTINEL_HOSTS')
+        sentinel_hosts = loads(sentinel_hosts)
+
+        self.redis = SentinelClient(io_loop=self.application.io_loop)
+        self.redis.connect(
+            sentinels=sentinel_hosts,
+            master_name=self.application.config['REDIS_MASTER'],
+            callback=self.on_connect
+        )
+
+    def on_connect(self):
+        self.redis.subscribe(self.get_key(), callback=self.handle_redis_message)
 
     def handle_redis_message(self, message):
         print "SENT Message %s" % message
@@ -46,13 +60,13 @@ class SubWebSocket(tornado.websocket.WebSocketHandler):
         obj = loads(message)
 
         self.application.redis.publish(self.get_key(), dumps({
+            "type": "ping",
             "user": obj['user'],
-            "url": obj['url']
+            "id": str(self.uuid)
         }))
 
     def on_close(self):
-        self.application.pubsub.unsubscribe(self.get_key())
-        self.application.pubsub._sub_callback = None
+        self.redis.unsubscribe(self.get_key())
 
     def get_key(self):
         return base64.b64encode(self.url.rstrip('/'))
@@ -95,15 +109,8 @@ class WhosOnApiServer(Server):
             master_name=self.application.config['REDIS_MASTER']
         )
 
-        self.application.pubsub.connect(
-            sentinels=sentinel_hosts,
-            master_name=self.application.config['REDIS_MASTER']
-        )
-
-
     def after_start(self, io_loop):
         self.application.redis = SentinelClient(io_loop=self.application.io_loop, disconnect_callback=self.on_disconnect)
-        self.application.pubsub = SentinelClient(io_loop=self.application.io_loop, disconnect_callback=self.on_disconnect)
         self.connect()
 
     def on_disconnect(self, status):
